@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import os
 
+from app.middleware import AbuseProtectionMiddleware
 from app.server import mcp
 
 # Host/Origin validation only when an explicit allowlist is configured
@@ -18,6 +19,7 @@ app = mcp.http_app(
     stateless_http=True,
     host_origin_protection=_allowed_hosts_configured,
 )
+app.add_middleware(AbuseProtectionMiddleware)
 
 _fastmcp_lifespan = app.router.lifespan_context
 

@@ -105,6 +105,16 @@ Railway 기준 (Dockerfile 자동 감지):
 | `DART_API_KEY` | ✅ | [opendart.fss.or.kr](https://opendart.fss.or.kr) 무료 발급 (일 20,000건) |
 | `FASTMCP_HTTP_ALLOWED_HOSTS` | ✅ | `["<서비스>.up.railway.app","healthcheck.railway.app"]` |
 | `RATE_LIMIT_RPS` / `RATE_LIMIT_BURST` | — | 기본 5 / 15 |
+| `ABUSE_RATE_LIMIT_REQUESTS` / `ABUSE_RATE_LIMIT_WINDOW_SECONDS` | — | IP별 허용량, 기본 30회 / 60초 |
+| `ABUSE_HEALTH_RATE_LIMIT_REQUESTS` | — | IP별 헬스체크 허용량, 기본 120회 / 60초 |
+| `ABUSE_STRIKES_TO_BLOCK` / `ABUSE_BLOCK_SECONDS` | — | 반복 초과 차단, 기본 3회 / 3,600초 |
+| `ABUSE_BLOCKED_IPS` | — | 전역 차단 IP/CIDR 목록 (쉼표 구분) |
+| `ABUSE_MAX_CLIENTS` | — | 추적/차단 상태 상한, 기본 10,000 |
+
+Railway에서는 Edge가 제공하는 `X-Real-IP`로 사용자를 구분한다. 다른 신뢰
+프록시에서 실행할 때만 `ABUSE_TRUST_X_REAL_IP=true`를 명시한다. `/health`도
+우회 경로가 되지 않도록 별도 상한을 적용하며, 모든 HTTP 요청은 MCP 처리 전에
+제한된다.
 
 3. Serverless(App Sleeping) **비활성** 권장 — 콜드 스타트 시 커넥터 연결 실패 방지
 
