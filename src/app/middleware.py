@@ -10,46 +10,19 @@ import json
 import os
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
-from ipaddress import IPv4Network, IPv6Network, ip_address, ip_network
+from ipaddress import ip_address
 from math import ceil
 from time import monotonic
-from typing import Callable, Iterable
+from typing import Callable
 
 from fastmcp.server.middleware.rate_limiting import RateLimitingMiddleware
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-IpNetwork = IPv4Network | IPv6Network
-
-
-def _positive_int(name: str, default: int) -> int:
-    value = int(os.environ.get(name, str(default)))
-    if value <= 0:
-        raise ValueError(f"{name} must be greater than zero")
-    return value
-
-
-def _positive_override(value: int | None, name: str, default: int) -> int:
-    resolved = _positive_int(name, default) if value is None else value
+def _positive_override(value: int | None, default: int, label: str) -> int:
+    resolved = default if value is None else value
     if resolved <= 0:
-        raise ValueError(f"{name} must be greater than zero")
+        raise ValueError(f"{label} must be greater than zero")
     return resolved
-
-
-def _env_bool(name: str, default: bool) -> bool:
-    value = os.environ.get(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _blocked_networks(value: str | Iterable[str]) -> tuple[IpNetwork, ...]:
-    entries = value.split(",") if isinstance(value, str) else value
-    networks: list[IpNetwork] = []
-    for entry in entries:
-        candidate = entry.strip()
-        if candidate:
-            networks.append(ip_network(candidate, strict=False))
-    return tuple(networks)
 
 
 @dataclass
@@ -61,9 +34,9 @@ class _ClientState:
 class AbuseProtectionMiddleware:
     """Bounded, process-wide abuse protection for the public HTTP transport.
 
-    Railway terminates public traffic at its edge and supplies ``X-Real-IP``.
-    That header is trusted only on Railway (or with an explicit opt-in) so a
-    direct client cannot rotate identities with a spoofed forwarding header.
+    Railway requests are recognized by their injected request ID, then the
+    edge-provided ``X-Real-IP`` is used automatically. No deployment variables
+    or operator-managed denylist are required.
     """
 
     def __init__(
@@ -77,49 +50,34 @@ class AbuseProtectionMiddleware:
         strike_window_seconds: int | None = None,
         block_seconds: int | None = None,
         max_clients: int | None = None,
-        blocked_networks: str | Iterable[str] | None = None,
         trust_x_real_ip: bool | None = None,
         clock: Callable[[], float] = monotonic,
     ) -> None:
         self.app = app
         self.requests_per_window = _positive_override(
-            requests_per_window, "ABUSE_RATE_LIMIT_REQUESTS", 30
+            requests_per_window, 30, "requests_per_window"
         )
         self.health_requests_per_window = _positive_override(
             health_requests_per_window,
-            "ABUSE_HEALTH_RATE_LIMIT_REQUESTS",
             120,
+            "health_requests_per_window",
         )
         self.window_seconds = _positive_override(
-            window_seconds, "ABUSE_RATE_LIMIT_WINDOW_SECONDS", 60
+            window_seconds, 60, "window_seconds"
         )
         self.strikes_to_block = _positive_override(
-            strikes_to_block, "ABUSE_STRIKES_TO_BLOCK", 3
+            strikes_to_block, 3, "strikes_to_block"
         )
         self.strike_window_seconds = _positive_override(
-            strike_window_seconds, "ABUSE_STRIKE_WINDOW_SECONDS", 600
+            strike_window_seconds, 600, "strike_window_seconds"
         )
         self.block_seconds = _positive_override(
-            block_seconds, "ABUSE_BLOCK_SECONDS", 3600
+            block_seconds, 3600, "block_seconds"
         )
         self.max_clients = _positive_override(
-            max_clients, "ABUSE_MAX_CLIENTS", 10_000
+            max_clients, 10_000, "max_clients"
         )
-        configured_networks = (
-            os.environ.get("ABUSE_BLOCKED_IPS", "")
-            if blocked_networks is None
-            else blocked_networks
-        )
-        self.blocked_networks = _blocked_networks(configured_networks)
-        on_railway = bool(
-            os.environ.get("RAILWAY_PROJECT_ID")
-            or os.environ.get("RAILWAY_ENVIRONMENT_ID")
-        )
-        self.trust_x_real_ip = (
-            _env_bool("ABUSE_TRUST_X_REAL_IP", on_railway)
-            if trust_x_real_ip is None
-            else trust_x_real_ip
-        )
+        self.trust_x_real_ip = trust_x_real_ip
         self.clock = clock
         self._clients: OrderedDict[str, _ClientState] = OrderedDict()
         self._blocked_until: OrderedDict[str, float] = OrderedDict()
@@ -143,17 +101,12 @@ class AbuseProtectionMiddleware:
         )
         state_id = f"{'health' if scope.get('path') == '/health' else 'http'}:{client_id}"
 
-        if self._is_manually_blocked(client_id):
-            await self._send_rejection(send, 403, "forbidden")
-            return
-
         blocked_until = self._blocked_until.get(client_id)
         if blocked_until is not None:
             if blocked_until > now:
                 self._blocked_until.move_to_end(client_id)
                 await self._send_rejection(
                     send,
-                    429,
                     "temporarily_blocked",
                     ceil(blocked_until - now),
                     request_limit,
@@ -185,7 +138,6 @@ class AbuseProtectionMiddleware:
                 retry_after = self.block_seconds
             await self._send_rejection(
                 send,
-                429,
                 "rate_limit_exceeded",
                 retry_after,
                 request_limit,
@@ -196,10 +148,17 @@ class AbuseProtectionMiddleware:
         await self.app(scope, receive, send)
 
     def _client_id(self, scope: Scope) -> str:
-        if self.trust_x_real_ip:
+        headers = scope.get("headers", [])
+        trust_x_real_ip = self.trust_x_real_ip
+        if trust_x_real_ip is None:
+            trust_x_real_ip = any(
+                key.lower() == b"x-railway-request-id" for key, _ in headers
+            )
+
+        if trust_x_real_ip:
             real_ip_values = [
                 value
-                for key, value in scope.get("headers", [])
+                for key, value in headers
                 if key.lower() == b"x-real-ip"
             ]
             if len(real_ip_values) == 1:
@@ -216,13 +175,6 @@ class AbuseProtectionMiddleware:
                 return client[0]
         return "unknown"
 
-    def _is_manually_blocked(self, client_id: str) -> bool:
-        try:
-            client_ip = ip_address(client_id)
-        except ValueError:
-            return False
-        return any(client_ip in network for network in self.blocked_networks)
-
     def _remember_block(self, client_id: str, blocked_until: float) -> None:
         if len(self._blocked_until) >= self.max_clients:
             self._blocked_until.popitem(last=False)
@@ -236,10 +188,9 @@ class AbuseProtectionMiddleware:
     async def _send_rejection(
         self,
         send: Send,
-        status: int,
         error: str,
-        retry_after: int | None = None,
-        request_limit: int | None = None,
+        retry_after: int,
+        request_limit: int,
     ) -> None:
         body = json.dumps(
             {"error": error},
@@ -249,19 +200,13 @@ class AbuseProtectionMiddleware:
             (b"content-type", b"application/json"),
             (b"content-length", str(len(body)).encode("ascii")),
             (b"cache-control", b"no-store"),
+            (b"retry-after", str(retry_after).encode("ascii")),
+            (b"x-ratelimit-limit", str(request_limit).encode("ascii")),
         ]
-        if retry_after is not None:
-            headers.append((b"retry-after", str(retry_after).encode("ascii")))
-            headers.append(
-                (
-                    b"x-ratelimit-limit",
-                    str(request_limit or self.requests_per_window).encode("ascii"),
-                )
-            )
         await send(
             {
                 "type": "http.response.start",
-                "status": status,
+                "status": 429,
                 "headers": headers,
             }
         )

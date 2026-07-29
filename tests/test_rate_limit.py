@@ -85,7 +85,7 @@ async def test_repeat_offender_is_blocked_before_handler_execution():
     assert calls["count"] == 1
 
 
-async def test_railway_real_ip_isolates_clients():
+async def test_railway_real_ip_is_detected_without_configuration():
     app, calls = _protected_app(
         requests_per_window=1,
         health_requests_per_window=10,
@@ -93,17 +93,26 @@ async def test_railway_real_ip_isolates_clients():
         strikes_to_block=1,
         strike_window_seconds=600,
         block_seconds=120,
-        trust_x_real_ip=True,
     )
     transport = httpx.ASGITransport(app=app, client=("10.0.0.1", 1234))
+    railway_headers = {"x-railway-request-id": "req-1"}
 
     async with httpx.AsyncClient(
         transport=transport,
         base_url="http://test",
     ) as client:
-        first = await client.post("/mcp", headers={"x-real-ip": "203.0.113.10"})
-        blocked = await client.post("/mcp", headers={"x-real-ip": "203.0.113.10"})
-        other = await client.post("/mcp", headers={"x-real-ip": "203.0.113.11"})
+        first = await client.post(
+            "/mcp",
+            headers={**railway_headers, "x-real-ip": "203.0.113.10"},
+        )
+        blocked = await client.post(
+            "/mcp",
+            headers={**railway_headers, "x-real-ip": "203.0.113.10"},
+        )
+        other = await client.post(
+            "/mcp",
+            headers={**railway_headers, "x-real-ip": "203.0.113.11"},
+        )
 
     assert [first.status_code, blocked.status_code, other.status_code] == [
         200,
@@ -111,32 +120,6 @@ async def test_railway_real_ip_isolates_clients():
         200,
     ]
     assert calls["count"] == 2
-
-
-async def test_manual_cidr_block_applies_before_every_http_route():
-    app, calls = _protected_app(
-        requests_per_window=10,
-        health_requests_per_window=10,
-        window_seconds=60,
-        strikes_to_block=3,
-        strike_window_seconds=600,
-        block_seconds=120,
-        blocked_networks="203.0.113.0/24",
-        trust_x_real_ip=False,
-    )
-    transport = httpx.ASGITransport(app=app, client=("203.0.113.10", 1234))
-
-    async with httpx.AsyncClient(
-        transport=transport,
-        base_url="http://test",
-    ) as client:
-        denied = await client.post("/mcp")
-        health = await client.get("/health")
-
-    assert denied.status_code == 403
-    assert denied.json() == {"error": "forbidden"}
-    assert health.status_code == 403
-    assert calls["count"] == 0
 
 
 async def test_untrusted_real_ip_header_cannot_rotate_identity():
@@ -147,7 +130,6 @@ async def test_untrusted_real_ip_header_cannot_rotate_identity():
         strikes_to_block=2,
         strike_window_seconds=600,
         block_seconds=120,
-        trust_x_real_ip=False,
     )
     transport = httpx.ASGITransport(app=app, client=("203.0.113.10", 1234))
 
