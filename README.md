@@ -143,6 +143,10 @@ uv run pytest -m live -o addopts=""    # 실제 KRX/DART 검증 (키 필요)
 
 이슈·PR 환영. 원칙 하나만 지켜달라: **데이터가 없으면 없다고 답한다.** 추정치 주입·하드코딩 폴백이 들어간 PR은 받지 않는다. 테스트는 `uv run pytest` 통과 필수.
 
+## 👤 Author
+
+Built and maintained by **[Sanghyeon Baek (백상현 · @Mrbaeksang)](https://baeksang.dev)** · [GitHub](https://github.com/Mrbaeksang)
+
 ## 📜 License
 
 [Apache-2.0](LICENSE)
